@@ -163,7 +163,6 @@ export default function App() {
   });
 
   /* ---- derived data ---- */
-  const custData       = customers.find(c => c.id === currentCust) || customers[0];
   const filteredDev    = devices.filter(d =>
     d.name.toLowerCase().includes(search.toLowerCase()) ||
     d.model.toLowerCase().includes(search.toLowerCase()) ||
@@ -199,10 +198,18 @@ export default function App() {
     setAlerts(prev => prev.map(a => a.id === id ? { ...a, ack: true } : a));
   };
 
-  const submitNewCustomer = async () => {
-    if (!custForm.customerId || !custForm.customerName) { setError('Customer ID and Name are required.'); return; }
-    const res = await apiFetch('/customers', { method: 'POST', body: JSON.stringify(custForm) });
-    const newC = {
+const submitNewCustomer = async () => {
+  if (!custForm.customerId || !custForm.customerName) {
+    setError('Customer ID and Name are required.');
+    return;
+  }
+
+  await fetch('/customers', {
+    method: 'POST',
+    body: JSON.stringify(custForm)
+  });
+
+  const newC = {
       id: custForm.customerId, name: custForm.customerName,
       email: custForm.contactEmail, phone: custForm.contactPhone,
       address: custForm.address, city: custForm.city,
