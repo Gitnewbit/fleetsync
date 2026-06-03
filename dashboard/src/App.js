@@ -163,6 +163,7 @@ export default function App() {
   });
 
   /* ---- derived data ---- */
+  const custData       = customers.find(c => c.id === currentCust) || customers[0];
   const filteredDev    = devices.filter(d =>
     d.name.toLowerCase().includes(search.toLowerCase()) ||
     d.model.toLowerCase().includes(search.toLowerCase()) ||
@@ -198,18 +199,10 @@ export default function App() {
     setAlerts(prev => prev.map(a => a.id === id ? { ...a, ack: true } : a));
   };
 
-const submitNewCustomer = async () => {
-  if (!custForm.customerId || !custForm.customerName) {
-    setError('Customer ID and Name are required.');
-    return;
-  }
-
-  await fetch('/customers', {
-    method: 'POST',
-    body: JSON.stringify(custForm)
-  });
-
-  const newC = {
+  const submitNewCustomer = async () => {
+    if (!custForm.customerId || !custForm.customerName) { setError('Customer ID and Name are required.'); return; }
+    const res = await apiFetch('/customers', { method: 'POST', body: JSON.stringify(custForm) });
+    const newC = {
       id: custForm.customerId, name: custForm.customerName,
       email: custForm.contactEmail, phone: custForm.contactPhone,
       address: custForm.address, city: custForm.city,
@@ -270,9 +263,110 @@ const submitNewCustomer = async () => {
   };
 
   const downloadInstaller = () => {
-    if (!generatedPkg) return;
-    const url = `${API}${generatedPkg.downloadUrl}`;
-    window.open(url, '_blank');
+    if (!generatedPkg || !selCustInst) return;
+    const c = selCustInst;
+    const apiUrl = instForm.apiUrl;
+    const interval = instForm.collectionInterval;
+
+    const script = `#!/usr/bin/env python3
+"""
+FleetSync Pro - SNMP Collector
+Customer: ${c.name} (${c.id})
+Generated: ${new Date().toISOString()}
+
+Requirements: pip install pysnmp requests schedule
+Run: python fleetsync_collector.py
+"""
+
+import json, time, requests, schedule, logging
+from datetime import datetime
+from pysnmp.hlapi import *
+
+CUSTOMER_ID   = "${c.id}"
+CUSTOMER_NAME = "${c.name}"
+API_URL       = "${apiUrl}/api/snmp-data"
+INTERVAL_SEC  = ${interval}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler("fleetsync_collector.log"),
+        logging.StreamHandler()
+    ]
+)
+
+SNMP_OIDS = {
+    "pageCount":       "1.3.6.1.2.1.43.10.2.1.4.1.1",
+    "tonerBlack":      "1.3.6.1.2.1.43.11.1.1.9.1.1",
+    "tonerCyan":       "1.3.6.1.2.1.43.11.1.1.9.1.2",
+    "tonerMagenta":    "1.3.6.1.2.1.43.11.1.1.9.1.3",
+    "tonerYellow":     "1.3.6.1.2.1.43.11.1.1.9.1.4",
+    "tonerBlackMax":   "1.3.6.1.2.1.43.11.1.1.8.1.1",
+    "tonerCyanMax":    "1.3.6.1.2.1.43.11.1.1.8.1.2",
+    "tonerMagentaMax": "1.3.6.1.2.1.43.11.1.1.8.1.3",
+    "tonerYellowMax":  "1.3.6.1.2.1.43.11.1.1.8.1.4",
+    "printerStatus":   "1.3.6.1.2.1.25.3.5.1.1.1",
+}
+
+# EDIT: Add the customer's printer IP addresses here
+DEVICES = [
+    {"ip": "192.168.1.50", "community": "public", "name": "Copier 1"},
+    {"ip": "192.168.1.51", "community": "public", "name": "Copier 2"},
+]
+
+def snmp_get(ip, community, oid):
+    try:
+        errorIndication, errorStatus, errorIndex, varBinds = next(
+            getCmd(SnmpEngine(), CommunityData(community, mpModel=1),
+                   UdpTransportTarget((ip, 161), timeout=2, retries=1),
+                   ContextData(), ObjectType(ObjectIdentity(oid)))
+        )
+        if errorIndication or errorStatus:
+            return None
+        for varBind in varBinds:
+            return int(varBind[1])
+    except Exception:
+        return None
+
+def collect_and_send():
+    results = []
+    for device in DEVICES:
+        data = {"name": device["name"], "ipAddress": device["ip"],
+                "customerId": CUSTOMER_ID, "timestamp": datetime.utcnow().isoformat() + "Z"}
+        for key, oid in SNMP_OIDS.items():
+            data[key] = snmp_get(device["ip"], device["community"], oid)
+        for color in ["Black", "Cyan", "Magenta", "Yellow"]:
+            cur = data.get(f"toner{color}")
+            mx  = data.get(f"toner{color}Max")
+            data[f"toner{color}Pct"] = round(cur / mx * 100) if cur and mx and mx > 0 else None
+        data["status"] = "online" if data.get("pageCount") is not None else "offline"
+        results.append(data)
+        logging.info(f"Collected {device['name']}: {data['status']}")
+    try:
+        r = requests.post(API_URL, json={"customerId": CUSTOMER_ID, "devices": results}, timeout=15)
+        logging.info(f"Sent to FleetSync API: HTTP {r.status_code}")
+    except Exception as e:
+        logging.error(f"Failed to send: {e}")
+
+if __name__ == "__main__":
+    logging.info(f"FleetSync Collector starting for {CUSTOMER_NAME}")
+    collect_and_send()
+    schedule.every(INTERVAL_SEC).seconds.do(collect_and_send)
+    while True:
+        schedule.run_pending()
+        time.sleep(10)
+`;
+
+    const blob = new Blob([script], { type: 'text/x-python' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `fleetsync_collector_${c.id}.py`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   /* ================================================================
@@ -737,7 +831,8 @@ const submitNewCustomer = async () => {
      MODALS
      ================================================================ */
 
-  const AddCustomerModal = () => (
+  // Modals use render props pattern — defined in JSX return to stay stable
+  const renderAddCustomerModal = () => (
     <div className="modal-backdrop" onClick={() => setAddCustOpen(false)}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
@@ -749,39 +844,39 @@ const submitNewCustomer = async () => {
           <div className="form-row">
             <div className="form-group">
               <label className="form-label">Customer ID *</label>
-              <input className="form-input" placeholder="CUST-001" value={custForm.customerId} onChange={e => setCustForm({ ...custForm, customerId: e.target.value })} />
+              <input className="form-input" placeholder="CUST-001" value={custForm.customerId} onChange={e => setCustForm(f => ({ ...f, customerId: e.target.value }))} />
             </div>
             <div className="form-group">
               <label className="form-label">Customer Name *</label>
-              <input className="form-input" placeholder="Acme Corporation" value={custForm.customerName} onChange={e => setCustForm({ ...custForm, customerName: e.target.value })} />
+              <input className="form-input" placeholder="Acme Corporation" value={custForm.customerName} onChange={e => setCustForm(f => ({ ...f, customerName: e.target.value }))} />
             </div>
           </div>
           <div className="form-row">
             <div className="form-group">
               <label className="form-label">Contact Email</label>
-              <input className="form-input" type="email" placeholder="admin@company.com" value={custForm.contactEmail} onChange={e => setCustForm({ ...custForm, contactEmail: e.target.value })} />
+              <input className="form-input" type="email" placeholder="admin@company.com" value={custForm.contactEmail} onChange={e => setCustForm(f => ({ ...f, contactEmail: e.target.value }))} />
             </div>
             <div className="form-group">
               <label className="form-label">Contact Phone</label>
-              <input className="form-input" placeholder="(555) 123-4567" value={custForm.contactPhone} onChange={e => setCustForm({ ...custForm, contactPhone: e.target.value })} />
+              <input className="form-input" placeholder="(555) 123-4567" value={custForm.contactPhone} onChange={e => setCustForm(f => ({ ...f, contactPhone: e.target.value }))} />
             </div>
           </div>
           <div className="form-group">
             <label className="form-label">Street Address</label>
-            <input className="form-input" placeholder="123 Business Ave" value={custForm.address} onChange={e => setCustForm({ ...custForm, address: e.target.value })} />
+            <input className="form-input" placeholder="123 Business Ave" value={custForm.address} onChange={e => setCustForm(f => ({ ...f, address: e.target.value }))} />
           </div>
           <div className="form-row">
             <div className="form-group">
               <label className="form-label">City</label>
-              <input className="form-input" value={custForm.city} onChange={e => setCustForm({ ...custForm, city: e.target.value })} />
+              <input className="form-input" value={custForm.city} onChange={e => setCustForm(f => ({ ...f, city: e.target.value }))} />
             </div>
             <div className="form-group">
               <label className="form-label">State</label>
-              <input className="form-input" placeholder="NY" value={custForm.state} onChange={e => setCustForm({ ...custForm, state: e.target.value })} />
+              <input className="form-input" placeholder="NY" value={custForm.state} onChange={e => setCustForm(f => ({ ...f, state: e.target.value }))} />
             </div>
             <div className="form-group">
               <label className="form-label">ZIP Code</label>
-              <input className="form-input" value={custForm.zip} onChange={e => setCustForm({ ...custForm, zip: e.target.value })} />
+              <input className="form-input" value={custForm.zip} onChange={e => setCustForm(f => ({ ...f, zip: e.target.value }))} />
             </div>
           </div>
         </div>
@@ -793,7 +888,7 @@ const submitNewCustomer = async () => {
     </div>
   );
 
-  const AddDeviceModal = () => (
+  const renderAddDeviceModal = () => (
     <div className="modal-backdrop" onClick={() => setAddDevOpen(false)}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
@@ -804,31 +899,31 @@ const submitNewCustomer = async () => {
           {error && <div className="error-banner">⚠️ {error}</div>}
           <div className="form-group">
             <label className="form-label">Device Name *</label>
-            <input className="form-input" placeholder="Main Lobby Copier" value={devForm.name} onChange={e => setDevForm({ ...devForm, name: e.target.value })} />
+            <input className="form-input" placeholder="Main Lobby Copier" value={devForm.name} onChange={e => setDevForm(f => ({ ...f, name: e.target.value }))} />
           </div>
           <div className="form-row">
             <div className="form-group">
               <label className="form-label">Model</label>
-              <input className="form-input" placeholder="Xerox VersaLink C7030" value={devForm.model} onChange={e => setDevForm({ ...devForm, model: e.target.value })} />
+              <input className="form-input" placeholder="Xerox VersaLink C7030" value={devForm.model} onChange={e => setDevForm(f => ({ ...f, model: e.target.value }))} />
             </div>
             <div className="form-group">
               <label className="form-label">IP Address *</label>
-              <input className="form-input" placeholder="192.168.1.100" value={devForm.ip} onChange={e => setDevForm({ ...devForm, ip: e.target.value })} />
+              <input className="form-input" placeholder="192.168.1.100" value={devForm.ip} onChange={e => setDevForm(f => ({ ...f, ip: e.target.value }))} />
             </div>
           </div>
           <div className="form-row">
             <div className="form-group">
               <label className="form-label">Location</label>
-              <input className="form-input" placeholder="Floor 2, East Wing" value={devForm.location} onChange={e => setDevForm({ ...devForm, location: e.target.value })} />
+              <input className="form-input" placeholder="Floor 2, East Wing" value={devForm.location} onChange={e => setDevForm(f => ({ ...f, location: e.target.value }))} />
             </div>
             <div className="form-group">
               <label className="form-label">Serial Number</label>
-              <input className="form-input" placeholder="XRX-2024-001" value={devForm.serial} onChange={e => setDevForm({ ...devForm, serial: e.target.value })} />
+              <input className="form-input" placeholder="XRX-2024-001" value={devForm.serial} onChange={e => setDevForm(f => ({ ...f, serial: e.target.value }))} />
             </div>
           </div>
           <div className="form-group">
             <label className="form-label">SNMP Community String</label>
-            <input className="form-input" placeholder="public" value={devForm.community} onChange={e => setDevForm({ ...devForm, community: e.target.value })} />
+            <input className="form-input" placeholder="public" value={devForm.community} onChange={e => setDevForm(f => ({ ...f, community: e.target.value }))} />
             <div className="form-hint">Usually "public". Check your MFP's SNMP settings.</div>
           </div>
         </div>
@@ -945,7 +1040,7 @@ const submitNewCustomer = async () => {
         </div>
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={() => setInstallerOpen(false)}>Close</button>
-          <button className="btn btn-primary"   onClick={downloadInstaller}>⬇️ Download EXE</button>
+          <button className="btn btn-primary"   onClick={downloadInstaller}>⬇️ Download Python Collector (.py)</button>
         </div>
       </div>
     </div>
@@ -1060,8 +1155,8 @@ const submitNewCustomer = async () => {
       </main>
 
       {/* ---- MODALS ---- */}
-      {addCustOpen     && <AddCustomerModal />}
-      {addDevOpen      && <AddDeviceModal />}
+      {addCustOpen     && renderAddCustomerModal()}
+      {addDevOpen      && renderAddDeviceModal()}
       {devDetailOpen   && <DeviceDetailModal />}
       {installerOpen   && <InstallerModal />}
       {alertDetailOpen && <AlertDetailModal />}
